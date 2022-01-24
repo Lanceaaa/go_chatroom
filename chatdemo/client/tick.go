@@ -23,10 +23,18 @@ type handler struct {
 
 func (h *handler) readloop(conn net.Conn) error {
 	logrus.Info("readloop started")
+	// 要求在指定时间 heartbeat (50秒) *3 内，可以读到数据
+	err := h.conn.SetReadDeadline(time.Now().Add(h.heartbeat * 3))
+	if err != nil {
+		return err
+	}
 	for {
 		frame, err := ws.ReadFrame(conn)
 		if err != nil {
 			return err
+		}
+		if frame.Header.OpCode == ws.OpPong {
+			_ = h.conn.SetReadDeadline(time.Now().Add(h.heartbeat * 3))
 		}
 		if frame.Header.OpCode == ws.OpClose {
 			return errors.New("remote side close the channel")
@@ -35,6 +43,19 @@ func (h *handler) readloop(conn net.Conn) error {
 			h.recv <- frame.Payload
 		}
 	}
+}
+
+func (h *handler) heartbeatloop() error {
+	logrus.Info("heartbeatloop started")
+
+	tick := time.NewTimer(h.heartbeat)
+	for range tick.C {
+		logrus.Info("ping...")
+		if err := wsutil.WriteClientMessage(h.conn, ws.OpPing, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // func (h *handler) heartbeatloop() error {
@@ -77,6 +98,12 @@ func connect(addr string) (*handler, error) {
 		}
 		// 通知上层
 		h.close <- struct{}{}
+	}()
+	go func() {
+		err := h.heartbeatloop()
+		if err != nil {
+			logrus.Info("heartbeatloop - ", err)
+		}
 	}()
 	return &h, nil
 }

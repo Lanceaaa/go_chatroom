@@ -1,13 +1,16 @@
 package serv
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 	"github.com/sirupsen/logrus"
 )
 
@@ -92,10 +95,18 @@ func (s *Server) DelUser(user string) {
 }
 
 func (s *Server) readloop(user string, conn net.Conn) error {
+	readwait := time.Minute * 2
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(readwait))
+
 		frame, err := ws.ReadFrame(conn)
 		if err != nil {
 			return err
+		}
+		if frame.Header.OpCode == ws.OpPing {
+			// 返回一个pong消息
+			_ = wsutil.WriteServerMessage(conn, ws.OpPong, nil)
+			continue
 		}
 		if frame.Header.OpCode == ws.OpClose {
 			return errors.New("remote side close the conn")
@@ -141,4 +152,28 @@ func (s *Server) Shutdown() {
 			conn.Close()
 		}
 	})
+}
+
+const (
+	CommandPing = 100
+	CommandPong = 101
+)
+
+func (s *Server) handleBinary(user string, message []byte) {
+	logrus.Infof("recv message %v from %s", message, user)
+	s.Lock()
+	defer s.Unlock()
+
+	i := 0
+	command := binary.BigEndian.Uint16(message[i : i+2])
+	i += 2
+	payloadLen := binary.BigEndian.Uint32(message[i : i+4])
+	logrus.Infof("command: %v payloadLen: %v", command, payloadLen)
+	if command == CommandPing {
+		u := s.users[user]
+		err := wsutil.WriteServerBinary(u, []byte{0, CommandPong, 0, 0, 0, 0})
+		if err != nil {
+			logrus.Errorf("write to %s failed, error: %v", user, err)
+		}
+	}
 }
